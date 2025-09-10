@@ -1,39 +1,87 @@
-const path = require('path');
-const express = require('express');
-const multer = require('multer');
-
+const express = require("express");
+const mongoose = require("mongoose");
+const multer = require("multer");
+const { GridFSBucket } = require("mongodb");
+const methodOverride = require("method-override");
+const path = require("path");
 const app = express();
-const PORT =  3000;
 
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        return cb(null, 'uploads/');
-    },
-    filename: function (req, file, cb) {
-        return cb(null, `${Date.now()}-${file.originalname}`);
+app.use(methodOverride("_method"));
+app.set("view engine", "ejs");
+
+// Database Connection
+mongoose.connect("mongodb://127.0.0.1:27017/fileUploads");
+const conn = mongoose.connection;
+
+let bucket;
+conn.once("open", () => {
+  console.log("✅ MongoDB connected");
+  bucket = new GridFSBucket(conn.db, { bucketName: "uploads" });
+});
+
+// Multer Storage (Memory)
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+// Upload Route
+app.post("/upload", upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).send("No file uploaded!");
+
+  const uploadStream = bucket.openUploadStream(req.file.originalname, {
+    contentType: req.file.mimetype,
+  });
+
+  uploadStream.end(req.file.buffer);
+
+  uploadStream.on("finish", () => {
+    console.log(`✅ File uploaded: ${req.file.originalname}`);
+    res.redirect("/");
+  });
+
+  uploadStream.on("error", (err) => {
+    console.error(err);
+    res.status(500).send("Upload failed!");
+  });
+});
+
+// Homepage Route
+app.get("/", async (req, res) => {
+  try {
+    const files = [];
+    const cursor = bucket.find();
+    for await (const file of cursor) {
+      file.isImage = file.contentType && file.contentType.startsWith("image/");
+      files.push(file);
     }
+    res.render("homepage", { files });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error fetching files");
+  }
 });
 
-const upload = multer({ storage: storage });
+// Route to Serve Images
+app.get("/image/:filename", async (req, res) => {
+  try {
+    const file = await bucket.find({ filename: req.params.filename }).next();
 
-app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
+    if (!file) {
+      return res.status(404).send("File not found");
+    }
 
-app.use(express.json());
+    if (!file.contentType.startsWith("image/")) {
+      return res.status(400).send("Not an image");
+    }
 
-app.use(express.urlencoded({ extended: false }));
-
-app.get('/', (req, res) => {
-    res.render('homepage'); 
+    const downloadStream = bucket.openDownloadStreamByName(req.params.filename);
+    downloadStream.pipe(res);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Error retrieving image");
+  }
 });
-app.post('/upload', upload.single('profileimage'), (req, res) => {
-    console.log(req.file);
-    console.log(req.body); 
-    return res.redirect('/');
-}
-);
 
-
+const PORT = 3000;
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
